@@ -1,9 +1,19 @@
-import usb.core
-import usb.util
-import struct
-import zlib
-import time
-from typing import List, Tuple, Optional, Callable, Union
+#!/usr/bin/env python3
+
+"""
+/etc/udev/rules.d/99-usb.rules
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fca", ATTR{idProduct}=="0001", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fca", ATTR{idProduct}=="8017", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fca", ATTR{idProduct}=="8001", MODE="0666", GROUP="plugdev"
+
+
+
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -a -G plugdev $USER
+"""
+
+import usb.core, usb.util, struct, zlib, time, re, os, sys, stat
+from typing import List, Tuple, Optional, Callable
 
 # Constants
 MAX_PACKET = 0x10000
@@ -184,7 +194,7 @@ class BBUSB:
             self.device = None
         self.id = 0
     
-    def read_data(self) -> Tuple[int, bytes]:
+    def read_data(self, timeout=1000) -> Tuple[int, bytes]:
         """Read data from the device"""
         if not self.device:
             raise USBError("Device not opened")
@@ -196,7 +206,7 @@ class BBUSB:
             endpoint = 0x81
         
         try:
-            data = self.device.read(endpoint, MAX_PACKET, timeout=1000)
+            data = self.device.read(endpoint, MAX_PACKET, timeout=timeout)
             
             if len(data) >= 4:
                 channel = struct.unpack('<H', data[0:2])[0]
@@ -265,7 +275,7 @@ class BBUSB:
         self.packet_num[0] += 1
         return cmd, result
     
-    def channel1(self, data: bytes) -> bytes:
+    def channel1(self, data: bytes, timeout=1000) -> bytes:
         """Channel 1 communication"""
         data_size = len(data)
         size = data_size + 10
@@ -293,7 +303,7 @@ class BBUSB:
         result = pkt[10:] if len(pkt) > 10 else b''
         
         # Read and discard second response
-        self.read_data()
+        self.read_data(timeout=timeout)
         
         return result
     
@@ -437,20 +447,63 @@ class BBUSB:
         self.read_data()  # Read response
 
 
-if __name__ == "__main__":
-    bb = BBUSB()
+def find_loader(targetId, directory='loaders'):
+    pattern = re.compile(r'^loader_([0-9A-Fa-f]{8})-.*\.bin$')
     
+    for filename in os.listdir(directory):
+        match = pattern.match(filename)
+        if match:
+            fileId = match.group(1)
+            if fileId.upper() == targetId.upper():
+                filePath = os.path.join(directory, filename)
+                with open(filePath, 'rb') as f:
+                    return f.read()
+
+
+def restart_program():
+    script_path = os.path.abspath(sys.argv[0])
+    st = os.stat(script_path)
+    os.chmod(script_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    os.execv(script_path, sys.argv)
+
+if __name__ == "__main__":
+    bb = BBUSB()    
 
     max_attempts = 50
     for attempt in range(max_attempts):
-        if bb.try_open([1]):
+        if bb.try_open([0x0001, 0x8001]):
             break
         time.sleep(0.1)
     else:
         raise Exception("No device")        
-    bb.ping0()
-    bb.set_mode(1)
-    model_id = bb.get_model_id()
-    print(f"Model ID: 0x{model_id:08X}")
+    
+    match bb.id:
+        case 0x0001:
+            print("Connected to device in bootrom")
+            bb.ping0()
+            bb.set_mode(1)
+            bb.password_info()
+            model_id = bb.get_model_id()
+            print(f"Model ID: 0x{model_id:08X}")
+
+            ramloader = find_loader(f"{model_id:08X}")
+            if ramloader:
+                print("Sending ramloader")
+                bb.send_loader(0x80200000, ramloader)
+                print("Sent ramloader, executing...")
+                bb.run_loader(0x80200000)
+                time.sleep(1)
+                restart_program()
+
+        case 0x8001:
+            print("Connected to device in ramloader")
+            bb.set_mode(2)
+            bb.password_info()
+            # TODO C4 - READVERIFY   00 dword(addr) dword(size) byte(val)
+        case _:
+            print("Connected to device in unknown mode")
+
+
+
     bb.close()
 
