@@ -12,7 +12,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -a -G plugdev $USER
 """
 
-import usb.core, usb.util, struct, zlib, time, re, os, sys, stat
+import usb.core, usb.util, struct, zlib, time, re, os, sys, stat, json
 from typing import List, Tuple, Optional, Callable
 
 # Constants
@@ -53,28 +53,7 @@ CMD_REBOOT = 0x80EF
 CMD_BLOCKED_OS = 0xEC
 CMD_SIGNATURE_TRAILER = 0x40F9
 
-
-class USBError(Exception):
-    """Custom exception for USB errors"""
-    pass
-
-
-def wait_for_device_with_id(vendor_id: int, product_id: int, timeout_ms: int) -> bool:
-    """Wait for a device with specific vendor and product ID to appear"""
-    start_time = time.time() * 1000
-    
-    while (time.time() * 1000 - start_time) < timeout_ms:
-        devices = usb.core.find(find_all=True, idVendor=vendor_id, idProduct=product_id)
-        if devices:
-            return True
-        time.sleep(0.1)
-    
-    return False
-
-
 class BBUSB:
-    """BlackBerry USB Communication Class"""
-    
     def __init__(self):
         self.device = None
         self.id = 0
@@ -85,17 +64,7 @@ class BBUSB:
         self.close()
     
     def open(self, product_ids: List[int], timeout_ms: int = 5000) -> bool:
-        """
-        Try to open USB device with specified product IDs within timeout period.
-
-        Args:
-            product_ids: List of product IDs to search for
-            timeout_ms: Timeout in milliseconds (default: 5000)
-
-        Returns:
-            bool: True if device successfully opened, False otherwise
-        """
-        self.id = 0
+        """Try to open USB device with specified product IDs within timeout period."""
         t = 0
 
         if self.device is not None:
@@ -149,9 +118,6 @@ class BBUSB:
                         except:
                             pass
                         
-                        self.packet_num = [0, 0, 0]
-                        self.mode = 0xFF
-                        
                         return True
                         
                     except Exception as e:
@@ -187,7 +153,7 @@ class BBUSB:
     def read_data(self, timeout=1000) -> Tuple[int, bytes]:
         """Read data from the device"""
         if not self.device:
-            raise USBError("Device not opened")
+            raise Exception("Device not opened")
         
         if self.id == 1 or self.id == 0x8001:
             endpoint = 0x82
@@ -205,14 +171,14 @@ class BBUSB:
                 return 0, b''
                 
         except usb.core.USBTimeoutError:
-            raise USBError("Timeout reading from device")
+            raise Exception("Timeout reading from device")
         except Exception as e:
-            raise USBError(f"Can't read from device: {e}")
+            raise Exception(f"Can't read from device: {e}")
     
     def send_data(self, channel: int, data: bytes) -> int:
         """Send data to the device"""
         if not self.device:
-            raise USBError("Device not opened")
+            raise Exception("Device not opened")
         
         data_size = len(data)
         size = data_size + 4
@@ -236,7 +202,7 @@ class BBUSB:
             transferred = self.device.write(endpoint, pkt, timeout=1000)
             return transferred
         except Exception as e:
-            raise USBError(f"USB transfer failed: {e}")
+            raise Exception(f"USB transfer failed: {e}")
     
     def channel0(self, cmd: int, data: bytes) -> Tuple[int, bytes]:
         """Channel 0 communication"""
@@ -279,7 +245,7 @@ class BBUSB:
         struct.pack_into('<I', pkt, 0, crc)
         
         self.send_data(1, pkt)
-        channel, pkt = self.read_data()
+        _, pkt = self.read_data()
         
         result = pkt[10:] if len(pkt) > 10 else b''
         
@@ -437,7 +403,7 @@ class BBUSB:
 
     def flash_regions_info(self) -> bytes:
         """Retrieves Flash Regions Info."""
-        cmd, data = self.channel2(CMD_FLASH_REGIONS_INFO, b'')
+        _, data = self.channel2(CMD_FLASH_REGIONS_INFO, b'')
         return data
 
     def blocked_os(self) -> bytes:
@@ -537,8 +503,17 @@ if __name__ == "__main__":
             bb.bugdisp_log()
             # print(str(bb.blocked_os()))
 
-            # TODO C4 - READVERIFY   00 dword(addr) dword(size) byte(val)
-            cmd, data = bb.channel2(0xC4, bytes([0]*8))
+            # C4 - READVERIFY   00 dword(addr) dword(size) byte(val)
+            addr = 0x80000000
+            size = 1
+            val = 0
+            while val < 256:
+                cmd, data = bb.channel2(0xC4, bytes([0x00]) + addr.to_bytes(4, 'little') + size.to_bytes(4, 'little') + bytes([val]))
+                print(cmd, data, val)
+                if data != bytes([0x01, 0x00, 0x00, 0x00]):
+                    print(hex(addr), size, hex(val))
+                    break
+                val += 1
         case _:
             print("Connected to device in unknown mode")
 
