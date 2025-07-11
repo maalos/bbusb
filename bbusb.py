@@ -17,6 +17,7 @@ from typing import List, Tuple, Optional, Callable
 
 # Constants
 MAX_PACKET = 0x10000
+MAX_FLASH_BLOCK = 0x3FF4
 BOOT_MODES = [
     b'RIM REINIT',
     b'RIM-BootLoader', 
@@ -25,7 +26,7 @@ BOOT_MODES = [
     b'RIM-BootNUKE'
 ]
 
-# Command constants
+# Bootrom commands
 CMD_PING = 0xF000
 CMD_READ_METRICS = 0xF001
 CMD_EXIT = 0xF002
@@ -40,6 +41,17 @@ CMD_WRITE_RAM_VERIFY = 0xF00A
 CMD_READ_MODEL_CODE = 0xF00B
 CMD_X1 = 0xF00C
 CMD_X2 = 0xF00D
+
+# Ramloader commands
+CMD_BUGDISP_LOG = 0xB0
+CMD_FLASH_REGIONS_INFO = 0xB4
+CMD_DEVICE_PIN = 0xE7
+CMD_SEND_BLOCK = 0xF7
+CMD_COMPLETE = 0x40C0
+CMD_GRS_WIPE = 0xC8
+CMD_REBOOT = 0x80EF
+CMD_BLOCKED_OS = 0xEC
+CMD_SIGNATURE_TRAILER = 0x40F9
 
 
 class USBError(Exception):
@@ -66,13 +78,13 @@ class BBUSB:
     def __init__(self):
         self.device = None
         self.id = 0
-        self.packet_num = [0, 0, 0]  # Array for packet numbers
+        self.packet_num = [0, 0, 0]
         self.mode = 0xFF
     
     def __del__(self):
         self.close()
     
-    def try_open(self, product_ids: List[int], timeout_ms: int = 5000) -> bool:
+    def open(self, product_ids: List[int], timeout_ms: int = 5000) -> bool:
         """
         Try to open USB device with specified product IDs within timeout period.
 
@@ -86,7 +98,6 @@ class BBUSB:
         self.id = 0
         t = 0
 
-        # Close existing device if open
         if self.device is not None:
             try:
                 usb.util.dispose_resources(self.device)
@@ -96,91 +107,70 @@ class BBUSB:
 
         while t < timeout_ms:
             try:
-                # Find all USB devices
                 devices = usb.core.find(find_all=True)
 
                 for device in devices:
-                    # Check if vendor ID matches 0x0FCA
-                    if device.idVendor == 0x0FCA:
-                        # Check if product ID matches any in the list
-                        for pid in product_ids:
-                            if device.idProduct == pid:
-                                try:
-                                    self.id = device.idProduct
-                                    self.device = device
+                    if device.idVendor != 0x0FCA or device.idProduct not in product_ids: continue
+                    try:
+                        self.id = device.idProduct
+                        self.device = device
 
-                                    # Get current configuration
-                                    try:
-                                        cfg = device.get_active_configuration()
-                                        current_config = cfg.bConfigurationValue
-                                    except:
-                                        current_config = 0
-
-                                    # Detach kernel drivers if active
-                                    try:
-                                        if device.is_kernel_driver_active(0):
-                                            device.detach_kernel_driver(0)
-                                    except:
-                                        pass  # Ignore errors
-
-                                    try:
-                                        if device.is_kernel_driver_active(1):
-                                            device.detach_kernel_driver(1)
-                                    except:
-                                        pass  # Ignore errors
-
-                                    # Set configuration to 1 if not already set
-                                    if current_config != 1:
-                                        try:
-                                            device.set_configuration(1)
-                                        except:
-                                            continue  # Try next device
-
-                                    # Claim interface 0 (required)
-                                    try:
-                                        usb.util.claim_interface(device, 0)
-                                    except:
-                                        continue  # Try next device
-
-                                    # Claim interface 1 (optional - ignore errors)
-                                    try:
-                                        usb.util.claim_interface(device, 1)
-                                    except:
-                                        pass  # Interface 1 is optional
-
-                                    # Initialize packet numbers and mode
-                                    self.packet_num = [0, 0, 0]
-                                    self.mode = 0xFF
-
-                                    return True  # Successfully opened
-
-                                except Exception as e:
-                                    # Device couldn't be opened - clean up
-                                    if self.device is not None:
-                                        try:
-                                            usb.util.dispose_resources(
-                                                self.device)
-                                        except:
-                                            pass
-                                        self.device = None
-                                    continue  # Try next device
-
+                        try:
+                            cfg = device.get_active_configuration()
+                            current_config = cfg.bConfigurationValue
+                        except:
+                            current_config = 0
+                        
+                        try:
+                            if device.is_kernel_driver_active(0):
+                                device.detach_kernel_driver(0)
+                        except:
+                            pass
+                        
+                        try:
+                            if device.is_kernel_driver_active(1):
+                                device.detach_kernel_driver(1)
+                        except:
+                            pass
+                        
+                        if current_config != 1:
+                            try:
+                                device.set_configuration(1)
+                            except:
+                                continue
+                        
+                        try:
+                            usb.util.claim_interface(device, 0)
+                        except:
+                            continue
+                        
+                        try:
+                            usb.util.claim_interface(device, 1)
+                        except:
+                            pass
+                        
+                        self.packet_num = [0, 0, 0]
+                        self.mode = 0xFF
+                        
+                        return True
+                        
+                    except Exception as e:
+                        if self.device is not None:
+                            try:
+                                usb.util.dispose_resources(
+                                    self.device)
+                            except:
+                                pass
+                            self.device = None
+                        continue
+                                    
             except Exception as e:
-                # Error enumerating devices, continue trying
                 pass
 
-            # Wait 100ms before next attempt
             time.sleep(0.1)
             t += 100
 
-        # Nothing found within timeout
         return False
-
-    
-    def open(self, product_ids: List[int], timeout_ms: int = 5000):
-        """Open device with specified product IDs, raise exception if not found"""
-        if not self.try_open(product_ids, timeout_ms):
-            raise USBError("Device with required ProductID(s) not found or could not be opened")
     
     def close(self):
         """Close the USB device"""
@@ -199,7 +189,6 @@ class BBUSB:
         if not self.device:
             raise USBError("Device not opened")
         
-        # Select endpoint based on device ID
         if self.id == 1 or self.id == 0x8001:
             endpoint = 0x82
         else:
@@ -231,15 +220,13 @@ class BBUSB:
         if size == 0:
             raise Exception("Zero-length packet")
         
-        # Create packet with header
         pkt = bytearray(size)
-        struct.pack_into('<H', pkt, 0, channel)  # Channel
-        struct.pack_into('<H', pkt, 2, size)     # Size
+        struct.pack_into('<H', pkt, 0, channel)
+        struct.pack_into('<H', pkt, 2, size)
         
         if data_size > 0:
             pkt[4:] = data
         
-        # Select endpoint based on device ID
         if self.id == 1 or self.id == 0x8001:
             endpoint = 0x02
         else:
@@ -257,7 +244,7 @@ class BBUSB:
         pkt = bytearray(size + 4)
         pkt[0] = cmd
         pkt[1] = self.mode
-        struct.pack_into('>H', pkt, 2, self.packet_num[0])  # Big-endian
+        struct.pack_into('>H', pkt, 2, self.packet_num[0])
         
         if size > 0:
             pkt[4:] = data
@@ -281,28 +268,21 @@ class BBUSB:
         size = data_size + 10
         pkt = bytearray(size)
         
-        # Copy input data to offset 10
         pkt[10:] = data
         
-        # Set packet size at offset 4 (little-endian)
         struct.pack_into('<I', pkt, 4, size)
         
-        # Set packet number at offset 8 (little-endian)
         struct.pack_into('<H', pkt, 8, self.packet_num[1])
         self.packet_num[1] += 1
         
-        # Calculate CRC32 of everything from offset 4 to end
         crc = zlib.crc32(pkt[4:]) & 0xFFFFFFFF
         struct.pack_into('<I', pkt, 0, crc)
         
-        # Send packet and read response
         self.send_data(1, pkt)
         channel, pkt = self.read_data()
         
-        # Extract response payload, skip first 10 bytes
         result = pkt[10:] if len(pkt) > 10 else b''
         
-        # Read and discard second response
         self.read_data(timeout=timeout)
         
         return result
@@ -313,13 +293,12 @@ class BBUSB:
         size = data_size + 8
         pkt = bytearray(size)
         
-        struct.pack_into('<H', pkt, 0, size)  # Size
-        struct.pack_into('<H', pkt, 2, cmd)   # Command
+        struct.pack_into('<H', pkt, 0, size)
+        struct.pack_into('<H', pkt, 2, cmd)
         
         if data_size > 0:
             pkt[4:4+data_size] = data
         
-        # Calculate CRC32 and append
         crc = zlib.crc32(pkt[0:data_size+4]) & 0xFFFFFFFF
         struct.pack_into('<I', pkt, data_size + 4, crc)
         
@@ -331,7 +310,6 @@ class BBUSB:
             payload_size = len(response) - 8
             
             if payload_size > 0:
-                # Verify CRC
                 crc1 = zlib.crc32(response[0:payload_size+4]) & 0xFFFFFFFF
                 crc2 = struct.unpack('<I', response[payload_size+4:payload_size+8])[0]
                 
@@ -342,7 +320,7 @@ class BBUSB:
             else:
                 result = b''
             
-            self.read_data()  # Discard second response
+            self.read_data()
             return resp_cmd, result
         
         return 0, b''
@@ -383,7 +361,7 @@ class BBUSB:
         """Get password information"""
         cmd = 0xA
         resp_cmd, result = self.channel0(cmd, b'')
-        self.read_data()  # Discard additional response
+        self.read_data()
         return result
     
     def get_metrics(self) -> bytes:
@@ -403,16 +381,14 @@ class BBUSB:
     
     def send_loader(self, addr: int, loader: bytes, callback: Optional[Callable[[int, int], None]] = None):
         """Send loader to device"""
-        CHUNK_SIZE = 2044 - 10 - 10  # 2024 bytes
+        CHUNK_SIZE = 2024
         
-        # Setup write
         data = bytearray(10)
         struct.pack_into('<H', data, 0, CMD_WRITE_RAM_SETUP)
         struct.pack_into('<I', data, 2, addr)
         struct.pack_into('<I', data, 6, len(loader))
         self.channel1(data)
         
-        # Send data in chunks
         bytes_sent = 0
         total_size = len(loader)
         
@@ -434,7 +410,6 @@ class BBUSB:
         if callback:
             callback(total_size, total_size)
         
-        # Verify
         verify_data = struct.pack('<H', CMD_WRITE_RAM_VERIFY)
         self.channel1(verify_data)
     
@@ -444,8 +419,68 @@ class BBUSB:
         struct.pack_into('<H', data, 0, CMD_EXECUTE_RAM)
         struct.pack_into('<I', data, 2, addr)
         self.channel1(data)
-        self.read_data()  # Read response
+        self.read_data()
+    
+    def bugdisp_log(self) -> bytes:
+        """Retrieves the Bugdisp Log from the device."""
+        result_data = b''
+        while True:
+            cmd, data = self.channel2(CMD_BUGDISP_LOG, bytes([0]*8))
+            if cmd == 0xB5:
+                result_data += data
+            elif cmd == 0xD0:
+                break
+            else:
+                print(f"Warning: Unexpected command {cmd:02X} during BugdispLog retrieval. Stopping.")
+                break
+        return result_data
 
+    def flash_regions_info(self) -> bytes:
+        """Retrieves Flash Regions Info."""
+        cmd, data = self.channel2(CMD_FLASH_REGIONS_INFO, b'')
+        return data
+
+    def blocked_os(self) -> bytes:
+        """Retrieves Blocked OS CFP (Controlled File Protocol) information."""
+        cmd, data = self.channel2(CMD_BLOCKED_OS, b'')
+        if cmd == 0xFD:
+            return data
+        else:
+            return b''
+
+    def device_pin(self) -> int:
+        """Retrieves the Device PIN."""
+        cmd, buff = self.channel2(CMD_DEVICE_PIN, b'')
+        if cmd == 0xD1 and len(buff) >= 4:
+            return struct.unpack('<I', buff[0:4])[0]
+        else:
+            return 0
+
+    def send_block(self, data: bytes) -> bool:
+        """Sends a data block to the device."""
+        cmd, _ = self.channel2(CMD_SEND_BLOCK, data)
+        return cmd == 0xDF
+
+    def complete(self) -> bool:
+        """Sends the 'Complete' command."""
+        cmd, _ = self.channel2(CMD_COMPLETE, b'')
+        return cmd == 0x4006
+
+    def grs_wipe(self) -> bool:
+        """Initiates a GRS (General Reset System) Wipe."""
+        dummy_buff = bytes([0] * MAX_FLASH_BLOCK)
+        cmd, _ = self.channel2(CMD_GRS_WIPE, dummy_buff)
+        return cmd == 0xD8
+
+    def send_signature(self, data: bytes) -> bool:
+        """Sends a signature block."""
+        cmd, _ = self.channel2(CMD_SIGNATURE_TRAILER, data)
+        return cmd == 0x4006
+
+    def reboot_loader(self) -> bool:
+        """Reboots the device using a loader-specific command (distinct from BBUSB.reboot)."""
+        cmd, _ = self.channel2(CMD_REBOOT, b'')
+        return cmd == 0x80C7
 
 def find_loader(targetId, directory='loaders'):
     pattern = re.compile(r'^loader_([0-9A-Fa-f]{8})-.*\.bin$')
@@ -471,7 +506,7 @@ if __name__ == "__main__":
 
     max_attempts = 50
     for attempt in range(max_attempts):
-        if bb.try_open([0x0001, 0x8001]):
+        if bb.open([0x0001, 0x8001]):
             break
         time.sleep(0.1)
     else:
@@ -499,11 +534,13 @@ if __name__ == "__main__":
             print("Connected to device in ramloader")
             bb.set_mode(2)
             bb.password_info()
+            bb.bugdisp_log()
+            # print(str(bb.blocked_os()))
+
             # TODO C4 - READVERIFY   00 dword(addr) dword(size) byte(val)
+            cmd, data = bb.channel2(0xC4, bytes([0]*8))
         case _:
             print("Connected to device in unknown mode")
 
 
-
     bb.close()
-
