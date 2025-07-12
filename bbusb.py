@@ -12,7 +12,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -a -G plugdev $USER
 """
 
-import usb.core, usb.util, struct, zlib, time, re, os, sys, stat, json
+import usb.core, usb.util, struct, zlib, time, re, os, sys, stat
 from typing import List, Tuple, Optional, Callable
 
 # Constants
@@ -175,7 +175,7 @@ class BBUSB:
         except Exception as e:
             raise Exception(f"Can't read from device: {e}")
     
-    def send_data(self, channel: int, data: bytes) -> int:
+    def send_data(self, channel: int, data: bytes, timeout=1000) -> int:
         """Send data to the device"""
         if not self.device:
             raise Exception("Device not opened")
@@ -199,12 +199,12 @@ class BBUSB:
             endpoint = 0x01
         
         try:
-            transferred = self.device.write(endpoint, pkt, timeout=1000)
+            transferred = self.device.write(endpoint, pkt, timeout=timeout)
             return transferred
         except Exception as e:
             raise Exception(f"USB transfer failed: {e}")
     
-    def channel0(self, cmd: int, data: bytes) -> Tuple[int, bytes]:
+    def channel0(self, cmd: int, data: bytes, timeout=1000) -> Tuple[int, bytes]:
         """Channel 0 communication"""
         size = len(data)
         pkt = bytearray(size + 4)
@@ -215,8 +215,8 @@ class BBUSB:
         if size > 0:
             pkt[4:] = data
         
-        self.send_data(0, pkt)
-        channel, response = self.read_data()
+        self.send_data(0, pkt, timeout=timeout)
+        channel, response = self.read_data(timeout=timeout)
         
         if len(response) >= 4:
             cmd = response[0]
@@ -244,8 +244,8 @@ class BBUSB:
         crc = zlib.crc32(pkt[4:]) & 0xFFFFFFFF
         struct.pack_into('<I', pkt, 0, crc)
         
-        self.send_data(1, pkt)
-        _, pkt = self.read_data()
+        self.send_data(1, pkt, timeout=timeout)
+        _, pkt = self.read_data(timeout=timeout)
         
         result = pkt[10:] if len(pkt) > 10 else b''
         
@@ -253,7 +253,7 @@ class BBUSB:
         
         return result
     
-    def channel2(self, cmd: int, data: bytes) -> Tuple[int, bytes]:
+    def channel2(self, cmd: int, data: bytes, timeout=1000) -> Tuple[int, bytes]:
         """Channel 2 communication"""
         data_size = len(data)
         size = data_size + 8
@@ -268,8 +268,8 @@ class BBUSB:
         crc = zlib.crc32(pkt[0:data_size+4]) & 0xFFFFFFFF
         struct.pack_into('<I', pkt, data_size + 4, crc)
         
-        self.send_data(2, pkt)
-        channel, response = self.read_data()
+        self.send_data(2, pkt, timeout=timeout)
+        channel, response = self.read_data(timeout=timeout)
         
         if channel == 2 and len(response) >= 8:
             resp_cmd = struct.unpack('<H', response[2:4])[0]
@@ -286,7 +286,7 @@ class BBUSB:
             else:
                 result = b''
             
-            self.read_data()
+            self.read_data(timeout=timeout)
             return resp_cmd, result
         
         return 0, b''
@@ -326,7 +326,7 @@ class BBUSB:
     def password_info(self) -> bytes:
         """Get password information"""
         cmd = 0xA
-        resp_cmd, result = self.channel0(cmd, b'')
+        _, result = self.channel0(cmd, b'')
         self.read_data()
         return result
     
@@ -444,8 +444,8 @@ class BBUSB:
         return cmd == 0x4006
 
     def reboot_loader(self) -> bool:
-        """Reboots the device using a loader-specific command (distinct from BBUSB.reboot)."""
-        cmd, _ = self.channel2(CMD_REBOOT, b'')
+        """Reboots the device in ramloader"""
+        cmd, _ = self.channel2(CMD_REBOOT, b'', timeout=50)
         return cmd == 0x80C7
 
 def find_loader(targetId, directory='loaders'):
@@ -453,12 +453,13 @@ def find_loader(targetId, directory='loaders'):
     
     for filename in os.listdir(directory):
         match = pattern.match(filename)
-        if match:
-            fileId = match.group(1)
-            if fileId.upper() == targetId.upper():
-                filePath = os.path.join(directory, filename)
-                with open(filePath, 'rb') as f:
-                    return f.read()
+        if not match or match.group(1).upper() != targetId.upper(): continue
+        
+        filePath = os.path.join(directory, filename)
+        with open(filePath, 'rb') as f:
+            return f.read()
+    
+    return None
 
 
 def restart_program():
@@ -467,14 +468,17 @@ def restart_program():
     os.chmod(script_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     os.execv(script_path, sys.argv)
 
+def hexlog(bytearr: bytearray):
+    print(str(bytearr.hex()))
+
 if __name__ == "__main__":
     bb = BBUSB()    
 
-    max_attempts = 50
-    for attempt in range(max_attempts):
-        if bb.open([0x0001, 0x8001]):
-            break
-        time.sleep(0.1)
+    max_attempts = 600
+    for _ in range(max_attempts):
+        if bb.open([0x0001, 0x8001]): break
+        
+        time.sleep(1)
     else:
         raise Exception("No device")        
     
@@ -498,21 +502,32 @@ if __name__ == "__main__":
 
         case 0x8001:
             print("Connected to device in ramloader")
-            bb.set_mode(2)
-            bb.password_info()
-            bb.bugdisp_log()
-            # print(str(bb.blocked_os()))
+
+            try: # test if we can set mode (ramloader just loaded)
+                bb.set_mode(2)
+                bb.password_info()
+                bb.bugdisp_log()
+            except: # we can't, force reboot
+                pass
+                print("Ramloader timeout, forcing reboot")
+                while True: # like really force it
+                    try:
+                        bb.reboot_loader()
+                    except:
+                        time.sleep(1)
+                        restart_program()
+
 
             # C4 - READVERIFY   00 dword(addr) dword(size) byte(val)
-            addr = 0x80000000
+            addr = 0x80200d08
             size = 1
             val = 0
+
             while val < 256:
                 cmd, data = bb.channel2(0xC4, bytes([0x00]) + addr.to_bytes(4, 'little') + size.to_bytes(4, 'little') + bytes([val]))
-                print(cmd, data, val)
-                if data != bytes([0x01, 0x00, 0x00, 0x00]):
-                    print(hex(addr), size, hex(val))
-                    break
+                #if data != bytes([0x01, 0x00, 0x00, 0x00]):
+                print(f"{cmd} {hex(addr)}: {data} {hex(val)}")
+                    # break
                 val += 1
         case _:
             print("Connected to device in unknown mode")
