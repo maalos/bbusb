@@ -295,14 +295,7 @@ class BBUSB:
         """Send ping on channel 0"""
         cmd = 1
         self.channel0(cmd, bytes([0x14, 0x05, 0x83, 0x19, 0x00, 0x00, 0x00, 0x00]))
-    
-    def switch_channel(self):
-        """Switch communication channel"""
-        self.send_data(1, bytes([6, 6]))
-        self.read_data()
-        self.read_data()
-        self.packet_num[1] = 0
-    
+        
     def reboot(self):
         """Reboot the device"""
         cmd = 3
@@ -518,17 +511,21 @@ if __name__ == "__main__":
                         restart_program()
 
 
+            """
+            # some shenanigans with C4 ramloader command
             # C4 - READVERIFY   00 dword(addr) dword(size) byte(val)
             addr = 0x80200d08
             size = 1
             val = 0
 
-            while val < 256:
-                cmd, data = bb.channel2(0xC4, bytes([0x00]) + addr.to_bytes(4, 'little') + size.to_bytes(4, 'little') + bytes([val]))
-                #if data != bytes([0x01, 0x00, 0x00, 0x00]):
-                print(f"{cmd} {hex(addr)}: {data} {hex(val)}")
-                    # break
-                val += 1
+            # while val < 256:
+            cmd, data = bb.channel2(0xC4, bytes(0x00) + addr.to_bytes(4, 'little') + size.to_bytes(4, 'little') + bytes(val))
+            #if data != bytes([0x01, 0x00, 0x00, 0x00]):
+            print(f"{cmd} {hex(addr)}: {data} {hex(val)}")
+                # break
+            # val += 1
+            """
+
         case _:
             print("Connected to device in unknown mode")
 
